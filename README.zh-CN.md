@@ -89,6 +89,24 @@ redirect_uri  qwenwork-cn://
 改写后的 worker 缓存在 `~/.cache/magpie/qwenwork-worker-runtime`
 （目录 `0700`，文件 `0600`）。
 
+## 用量
+
+magpie 会在 provider 旁边显示账号的积分。数据取自登录时已经在读的同一个
+`account-context`，因此不会额外发请求：
+
+| 显示项 | 来源 |
+|---|---|
+| 计划名 | `plan.name` |
+| 重置时间 | `plan.next_refresh_date`，没有则用 `plan.next_due_date` |
+| 已用积分 | `quota.used / quota.total`，显示为百分比与 `已用 / 总量 credits` |
+
+读取被拒（401/403）会标记登录失效；其它错误会脱敏后报出。实现见 `index.mjs`
+里的 `qwenworkUsage()`。`magpie quota qwenwork` 会在终端打印：
+
+```text
+qwenwork · Your Plan · until Nov 1 · you@example.com  subscription  Credits 1% (17.94 / 2000 credits)
+```
+
 ## 说明
 
 - magpie 用 bun 运行插件，而 SDK 默认的 worker transport 在 bun 下起不来；插件

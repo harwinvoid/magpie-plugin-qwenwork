@@ -91,6 +91,25 @@ Two facts about `@qoder-ai/qoder-agent-sdk` shape the plugin:
 The patched worker is cached under `~/.cache/magpie/qwenwork-worker-runtime`
 (dir `0700`, file `0600`).
 
+## Usage
+
+Magpie shows the account's credits beside the provider. They come from the same
+`account-context` the sign-in already reads, so no extra request is made:
+
+| Shown | From |
+|---|---|
+| plan name | `plan.name` |
+| reset time | `plan.next_refresh_date`, else `plan.next_due_date` |
+| credits used | `quota.used / quota.total`, as a percentage and `used / total credits` |
+
+A refused read (401/403) marks the sign-in lapsed; any other error is reported
+without a token. See `qwenworkUsage()` in `index.mjs`. `magpie quota qwenwork`
+prints it in the terminal:
+
+```text
+qwenwork · Your Plan · until Nov 1 · you@example.com  subscription  Credits 1% (17.94 / 2000 credits)
+```
+
 ## Notes
 
 - Magpie runs plugins under bun, where the SDK's default worker transport does
