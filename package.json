@@ -26,6 +26,7 @@
   ],
   "files": [
     "README.md",
+    "README.zh-CN.md",
     "check.mjs",
     "check-sdk.mjs",
     "defaults.json",

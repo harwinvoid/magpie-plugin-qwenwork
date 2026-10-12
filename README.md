@@ -1,5 +1,7 @@
 # opencode-qwenwork-auth — QwenWork (千问办公) for magpie / OpenCode
 
+[中文说明 / Chinese](README.zh-CN.md)
+
 Your QwenWork subscription as an OpenCode provider: signs in through QwenWork's
 own device flow and serves its models over the QwenWork Agent SDK.
 
