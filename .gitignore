@@ -1,0 +1,5 @@
+node_modules/
+sdk-config/
+sdk-debug-*.log
+*.tmp
+verification.json
