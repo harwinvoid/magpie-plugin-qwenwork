@@ -175,6 +175,8 @@ function prompt(messages) {
 }
 async function sdkTransport() {
   // ponytail: bun's Worker cannot host this runtime; run it as a child process instead.
+  // The test bridge never runs a worker, so it needs no runtime path.
+  if (process.env.QWENWORK_AGENT_SDK_TEST_MODE === '1') return undefined
   return new sdk.ProcessTransport({ pathToQoderCLIExecutable: await stageRuntime() })
 }
 // A request may not run forever: without this a stalled query holds a child
@@ -202,9 +204,57 @@ function publicMessage(value) {
   return text.length > 300 ? text.slice(0, 300) + '…' : text
 }
 
+// num renders a credit count as magpie shows one: no trailing zeros, at most
+// two decimals (1982.1652 -> "1982.17", 2000 -> "2000").
+const num = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '0'
+  return String(Math.round(n * 100) / 100)
+}
+
+// qwenworkUsage reads the account's credits for magpie's usage bar. The
+// account-context the sign-in already uses carries them: quota {total, used,
+// remaining, exceeded} in the plan's credit unit, and plan {name, next_refresh
+// / next_due}. One window is one pool of credits; when the plan refreshes, that
+// time is the window's reset.
+function qwenworkUsage(openapi) {
+  return async (getAuth) => {
+    let signIn = 'kept'
+    try {
+      const a = await getAuth()
+      if (a?.type !== 'oauth' || !String(a.access ?? '').trim() || (a.expires > 0 && a.expires <= Date.now())) return { error: 'QwenWork: not signed in', signIn: 'expired' }
+      const res = await fetch(`${openapi}/api/v1/adapter/user/account-context?include=user,plan,quota`, {
+        headers: { Accept: 'application/json', Authorization: `Bearer ${a.access}` },
+        signal: AbortSignal.timeout(20_000),
+      })
+      if (res.status === 401 || res.status === 403) return { error: 'QwenWork: the sign-in lapsed — sign in again', signIn: 'expired' }
+      if (!res.ok) return { error: `QwenWork: usage read failed (HTTP ${res.status})`, signIn }
+      const ctx = (await res.json())?.data ?? {}
+      const q = ctx.quota
+      const out = { signIn }
+      if (ctx.plan?.name) out.plan = String(ctx.plan.name)
+      const refresh = ctx.plan?.next_refresh_date ?? ctx.plan?.next_due_date
+      if (refresh) out.until = new Date(refresh).toISOString()
+      if (q && typeof q === 'object') {
+        const total = Number(q.total)
+        const remaining = Number(q.remaining)
+        const used = Number.isFinite(Number(q.used)) ? Number(q.used) : total - remaining
+        if (Number.isFinite(total) && total > 0 && Number.isFinite(used) && used >= 0) {
+          out.windows = [{ name: 'Credits', used: Math.min(100, (100 * used) / total), display: `${num(used)} / ${num(total)} credits` }]
+        }
+      }
+      if (!out.windows) out.error = 'QwenWork: the account reports no credits'
+      return out
+    } catch (e) {
+      return { error: publicMessage(e?.message ?? e), signIn }
+    }
+  }
+}
+
 export async function QwenWorkAuthPlugin({ client }) {
   // Warm the worker runtime now (it may download once); a request awaits it.
-  stageRuntime().catch(() => {})
+  // Not under the test bridge, which never runs a real worker.
+  if (process.env.QWENWORK_AGENT_SDK_TEST_MODE !== '1') stageRuntime().catch(() => {})
   const clientId = setting('CLIENT_ID')
   const web = origin('WEB')
   const openapi = origin('OPENAPI')
@@ -214,7 +264,7 @@ export async function QwenWorkAuthPlugin({ client }) {
   const site = { id: 'qwenwork', name: 'QwenWork', clientId, web, openapi, api, rsaKey: rsa, cosyVersion: setting('COSY_VERSION'), redirect: 'qwenwork-cn://', deviceOnly: true, deviceRefreshTarget: 'c', modelScene: 'qwork', listAllModels: true, clientType: '6', businessProduct: 'qoder_work', sessionType: 'qoder_work', userInfoPath: '/api/v1/adapter/user/account-context?include=user,plan,quota,page,data_sharing', normalizeUser: v => (v?.data ?? v)?.user ?? (v?.data ?? v), models: [] }
   const { makePlugin } = await import('./vendor/qoder.mjs')
   const plugin = await makePlugin(site)({ client })
-  delete plugin.auth.usage
+  plugin.auth.usage = qwenworkUsage(openapi)
   plugin.auth.icon = pluginIcon
   const modelCatalog = plugin.provider.models
   plugin.provider.models = async (provider, options) => Object.fromEntries(Object.entries(await modelCatalog(provider, options)).map(([key, m]) => [key, { ...m, api: { ...m.api, url: api } }]))

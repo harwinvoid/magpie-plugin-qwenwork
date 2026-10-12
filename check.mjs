@@ -56,7 +56,11 @@ try {
           assert.ok(url.searchParams.get('verifier'))
           return Response.json({ token: 'fake-device', refresh_token: 'fake-device-refresh', user_id: 'fixture-user', expires_in: 3600 })
         case '/api/v1/adapter/user/account-context':
-          return Response.json({ data: { user: { id: 'fixture-user', name: 'Fixture', email: '' } } })
+          return Response.json({ data: {
+            user: { id: 'fixture-user', name: 'Fixture', email: '' },
+            plan: { name: 'Fixture Plan', next_refresh_date: '2026-11-01T00:00:00Z' },
+            quota: { total: 2000, used: 17.8348, remaining: 1982.1652, exceeded: false },
+          } })
         case '/api/v1/deviceToken/refresh':
           assert.equal(body.target, 'c')
           if (rejectRefresh) return Response.json({ error: 'expired' }, { status: 401 })
@@ -83,7 +87,7 @@ try {
   assert.deepEqual(Object.keys(config.provider), ['qwenwork'])
   assert.deepEqual(config.provider.qwenwork.models, {})
   assert.equal(plugin.auth.provider, 'qwenwork')
-  assert.equal(plugin.auth.usage, undefined)
+  assert.equal(typeof plugin.auth.usage, 'function', 'the provider reports usage')
   assert.match(plugin.auth.icon, /^data:image\/png;base64,/, 'the provider carries its own icon')
   assert.equal(plugin.auth.methods.length, 1)
   const login = await plugin.auth.methods[0].authorize()
@@ -96,6 +100,16 @@ try {
 
   const catalog = await plugin.provider.models({ models: {} }, { auth })
   assert.equal(catalog['fixture-model'].providerID, 'qwenwork')
+
+  const usage = await plugin.auth.usage(async () => auth)
+  assert.equal(usage.signIn, 'kept')
+  assert.equal(usage.plan, 'Fixture Plan')
+  assert.equal(usage.until, '2026-11-01T00:00:00.000Z')
+  assert.deepEqual(usage.windows, [{ name: 'Credits', used: (100 * 17.8348) / 2000, display: '17.83 / 2000 credits' }])
+  const usageGone = await plugin.auth.usage(async () => ({ ...auth, expires: Date.now() - 1 }))
+  assert.equal(usageGone.signIn, 'expired')
+  checks.push('Usage reports the account\'s credits and plan')
+
   auth.expires = 0
   const loader = await plugin.auth.loader(async () => auth)
   const completion = { model: 'fixture-model', messages: [{ role: 'user', content: 'fixture prompt' }], tools: [{ type: 'function', function: { name: 'lookup' } }] }
