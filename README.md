@@ -16,16 +16,31 @@ The package exports `QwenWorkAuthPlugin`.
 
 ## Install
 
-From this repository:
+From this GitHub repository (recommended):
 
 ```sh
 magpie plugin add github:harwinvoid/magpie-plugin-qwenwork
 magpie plugin login qwenwork
 ```
 
+`magpie plugin add` accepts any spec bun does: an npm package, a `github:owner/repo`
+repository, or a local folder. This repository is meant to be installed by its
+`github:` spec — that is what follows the code here and picks up updates.
+
 Installing fetches the Agent SDK (`@qoder-ai/qoder-agent-sdk`) as a dependency;
 the worker runtime it needs is downloaded on first use (see below). Then pick
 `qwenwork/<model>` for an agent, e.g. `magpie claude qwenwork/flash`.
+
+- **Already installed from a local folder?** Add the `github:` spec and remove
+  the folder one, so magpie tracks the repository instead:
+  ```sh
+  magpie plugin add github:harwinvoid/magpie-plugin-qwenwork
+  magpie plugin rm /path/to/your/local/magpie-plugin-qwenwork
+  ```
+  The sign-in carries over; the worker cache is reused.
+- **Finding it in the app.** The repository is tagged `magpie-plugin`, so magpie
+  lists it under Plugins → Discover → *Unofficial* (community plugins, not
+  reviewed by magpie). Install it there, or with the command above.
 
 ## How it works
 

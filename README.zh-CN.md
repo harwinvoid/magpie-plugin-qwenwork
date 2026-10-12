@@ -16,16 +16,31 @@
 
 ## 安装
 
-从本仓库安装：
+从这个 GitHub 仓库安装（推荐）：
 
 ```sh
 magpie plugin add github:harwinvoid/magpie-plugin-qwenwork
 magpie plugin login qwenwork
 ```
 
+`magpie plugin add` 接受 bun 支持的各种 spec：npm 包、`github:owner/repo` 仓库，
+或本地目录。本仓库就是给 `github:` 方式安装用的 —— 这样才会跟随这里的代码、并
+收到更新。
+
 安装会把 Agent SDK（`@qoder-ai/qoder-agent-sdk`）作为依赖装好；它需要的
 worker 运行时会**在首次使用时自动下载**（见下文）。之后给某个 agent 选
 `qwenwork/<模型>` 即可，例如 `magpie claude qwenwork/flash`。
+
+- **之前是从本地目录装的？** 加上 `github:` spec、再删掉本地目录那条，让 magpie
+  改为跟踪仓库：
+  ```sh
+  magpie plugin add github:harwinvoid/magpie-plugin-qwenwork
+  magpie plugin rm /你本地/magpie-plugin-qwenwork 的路径
+  ```
+  登录态会保留，worker 缓存也会复用。
+- **在应用里找到它。** 本仓库打了 `magpie-plugin` topic，magpie 会把它列在
+  插件 → 发现 → *非官方*（社区插件，未经 magpie 审阅）。可以在那里安装，也可以用
+  上面的命令。
 
 ## 工作原理
 
