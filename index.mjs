@@ -3,12 +3,12 @@
 // endpoint overrides stay in the vendor SDK.
 const sdk = process.env.QWENWORK_AGENT_SDK_TEST_MODE === '1' ? await import('./check-sdk.mjs?test') : await import('@qoder-ai/qoder-agent-sdk')
 import { createPublicKey, createHash, randomUUID } from 'node:crypto'
-import { readFileSync, realpathSync, mkdirSync, chmodSync, statSync, writeFileSync, renameSync, rmSync, openSync, closeSync, existsSync } from 'node:fs'
+import { readFileSync, mkdirSync, chmodSync, statSync, writeFileSync, renameSync, rmSync, openSync, closeSync, existsSync } from 'node:fs'
 import { gunzipSync } from 'node:zlib'
-import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 
-const pluginDir = decodeURIComponent(realpathSync(fileURLToPath(new URL('.', import.meta.url))))
 // The Agent SDK's worker runtime, run as a child process. Two facts shape this:
 //
 //  - The worker is not shipped in the npm package; its postinstall downloads it
@@ -80,14 +80,30 @@ async function downloadWorker(manifest) {
 }
 
 let staged
+// sdkRoot is the installed @qoder-ai/qoder-agent-sdk package directory.
+// Magpie installs plugins in a workspace, so the SDK is hoisted beside this
+// plugin (or nested), never at a fixed path -- resolve its entry through Node's
+// module resolution and walk up to the package.json that owns it.
+function sdkRoot() {
+  const require = createRequire(import.meta.url)
+  let dir = dirname(require.resolve('@qoder-ai/qoder-agent-sdk'))
+  for (let i = 0; i < 8; i++) {
+    if (existsSync(join(dir, 'package.json'))) return dir
+    const up = dirname(dir)
+    if (up === dir) break
+    dir = up
+  }
+  throw new Error('QwenWork: could not locate the installed @qoder-ai/qoder-agent-sdk package')
+}
 function stageRuntime() {
   if (staged) return staged
-  const installed = `${pluginDir}/node_modules/@qoder-ai/qoder-agent-sdk/dist/_worker/qoder-worker-runtime.obf.mjs`
   staged = (async () => {
+    const root = sdkRoot()
+    const installed = join(root, 'dist/_worker/qoder-worker-runtime.obf.mjs')
     let source
     if (existsSync(installed)) source = readFileSync(installed)
     else {
-      const manifest = JSON.parse(readFileSync(`${pluginDir}/node_modules/@qoder-ai/qoder-agent-sdk/dist/runtime-manifest.json`, 'utf8'))
+      const manifest = JSON.parse(readFileSync(join(root, 'dist/runtime-manifest.json'), 'utf8'))
       source = await downloadWorker(manifest)
     }
     const pinned = pinToCn(source)
