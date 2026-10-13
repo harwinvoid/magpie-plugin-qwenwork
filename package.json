@@ -17,12 +17,7 @@
     "@qoder-ai/qoder-agent-sdk": "1.0.51"
   },
   "keywords": [
-    "opencode",
-    "opencode-plugin",
-    "magpie",
-    "qwenwork",
-    "qwen",
-    "alibaba"
+    "magpie-plugin"
   ],
   "files": [
     "README.md",
