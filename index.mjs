@@ -8,6 +8,11 @@ import { gunzipSync } from 'node:zlib'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// Paths the worker can use on every platform: URL.pathname gives "/C:/..." on
+// Windows, which the worker resolves to "C:\\C:\\..." and then cannot create.
+const localPath = rel => fileURLToPath(new URL(rel, import.meta.url))
 
 // The Agent SDK's worker runtime, run as a child process. Two facts shape this:
 //
@@ -148,8 +153,8 @@ const sdkEnv = () => ({
   NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy,
   QODER_WORK_INTEGRATION_MODE: '1', QODER_SITE: 'cn', QODERWORK_IS_CN: 'true',
   QODERCN_SERVER_ENDPOINT: origin('API'), QODER_SCENE: 'qwork', QODERCN_SCENE: 'qwork',
-  QODER_CONFIG_DIR: new URL('./sdk-config', import.meta.url).pathname,
-  QODERCN_CONFIG_DIR: new URL('./sdk-config', import.meta.url).pathname,
+  QODER_CONFIG_DIR: localPath('./sdk-config'),
+  QODERCN_CONFIG_DIR: localPath('./sdk-config'),
 })
 function sdkAuth(getAuth) {
   return sdk.jobToken(async () => {
@@ -296,7 +301,7 @@ export async function QwenWorkAuthPlugin({ client }) {
             env: sdkEnv(), abortController,
             controlRequestTimeoutMs: 60000,
             debug: process.env.QWENWORK_SDK_DEBUG === '1',
-            debugFile: process.env.QWENWORK_SDK_DEBUG === '1' ? new URL('./sdk-debug-magpie.log', import.meta.url).pathname : undefined,
+            debugFile: process.env.QWENWORK_SDK_DEBUG === '1' ? localPath('./sdk-debug-magpie.log') : undefined,
             stderr: x => process.env.QWENWORK_SDK_DEBUG === '1' && console.error('[qwenwork-sdk stderr]', x),
           },
         })
