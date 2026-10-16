@@ -294,6 +294,10 @@ export async function QwenWorkAuthPlugin({ client }) {
             cwd: process.cwd(), auth: sdkAuth(getAuth), model,
             transport: await sdkTransport(),
             maxTurns: 1, persistSession: false, tools: [], settingSources: [],
+            // Without this the CLI falls back to its coding-agent system
+            // prompt, and with no tool plumbing behind it the model leaks
+            // raw <tool_call> markup as answer text.
+            systemPrompt: 'You are a plain chat assistant. Answer in text only. Never emit tool calls, function-call markup, or any <tool_call> syntax.',
             // The SDK runs in a scratch cwd with every tool disallowed, so
             // nothing it is offered can act; bypassPermissions avoids a prompt
             // for the one turn. The chat never becomes a coding agent.
