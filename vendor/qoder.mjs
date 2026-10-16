@@ -749,8 +749,20 @@ function failure(status, text) {
 // errorResponse is a failure as OpenAI's API gives it. signIn is what it
 // means for the account (magpie's X-Magpie-Sign-In): a 401 keeps it unless
 // told expired, since the built-in marked only a refused refresh.
+// redact keeps a client-facing message from carrying a credential: an
+// upstream error is echoed near verbatim, so anything token-shaped in it
+// is masked and the rest cut, whatever path produced it.
+const redact = (value) => {
+  let text = String(value ?? "").replace(/\s+/g, " ").trim()
+  text = text
+    .replace(/\b(Bearer|COSY)[.\w-]*/gi, "$1 [redacted]")
+    .replace(/\bey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+  return text.length > 300 ? text.slice(0, 300) + "…" : text
+}
+
 const errorResponse = ({ status, message, signIn = status === 401 ? "kept" : undefined }) =>
-  new Response(JSON.stringify({ error: { message, type: "upstream_error", code: status } }), {
+  new Response(JSON.stringify({ error: { message: redact(message), type: "upstream_error", code: status } }), {
     status,
     headers: { "Content-Type": "application/json", ...(signIn ? { "X-Magpie-Sign-In": signIn } : {}) },
   })
@@ -1299,9 +1311,12 @@ export const makePlugin = (site) => async ({ client }) => {
 
   // ask is the answer to a chat completion on the live account cred.
   const ask = async (chat, cred, init) => {
+    // magpie's gateway hands the model back on with the provider's prefix;
+    // the catalog keys are bare
+    const want = String(chat.model ?? "").replace(new RegExp(`^${ID}/`), "")
     let m
     try {
-      m = (await models(cred)).find((x) => x.key === chat.model) ?? (await models(cred, true)).find((x) => x.key === chat.model)
+      m = (await models(cred)).find((x) => x.key === want) ?? (await models(cred, true)).find((x) => x.key === want)
     } catch (e) {
       // the built-in answered any failure to read the list 400
       // (QoderModelOf), a refused one included, marking nothing

@@ -2,22 +2,27 @@
 // Covered:
 // - Defaults and configuration validation fail before any request.
 // - Device login, model listing and refresh target the configured hosts.
-// - Chat is delegated to the Agent SDK, which reuses Magpie's access token.
-// - A lapsed sign-in fails before another SDK chat request.
+// - Chat is rewritten as QwenWork's agent_chat_generation request: the host's
+//   tools ride along, and tool calls come back structured — both the native
+//   delta.tool_calls kind and the inline <tool_call> text kind.
+// - A lapsed sign-in fails before another chat request.
+// - Client-facing errors carry no token-shaped text.
 import assert from 'node:assert/strict'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { QwenWorkAuthPlugin } from './index.mjs'
+import { _internal } from './vendor/qoder.mjs'
 
-const names = ['CLIENT_ID', 'WEB', 'OPENAPI', 'API', 'RSA_PUBLIC_KEY', 'COSY_VERSION', 'AGENT_SDK_TEST_MODE']
+const names = ['CLIENT_ID', 'WEB', 'OPENAPI', 'API', 'RSA_PUBLIC_KEY', 'COSY_VERSION']
 const savedEnv = Object.fromEntries(names.map(k => [k, process.env['QWENWORK_' + k]]))
 const originalFetch = globalThis.fetch
 const checks = []
 let requests = 0
+// the agent_chat requests the mock saw, decoded
+let agentChats = []
 try {
   for (const k of names) delete process.env['QWENWORK_' + k]
-  process.env.QWENWORK_AGENT_SDK_TEST_MODE = '1'
   globalThis.fetch = () => { requests++; throw new Error('Unexpected network request') }
   const defaults = await QwenWorkAuthPlugin({ client: {} })
   const defaultLogin = new URL((await defaults.auth.methods[0].authorize()).url)
@@ -46,6 +51,9 @@ try {
 
   let auth
   let rejectRefresh = false
+  // how the mock's agent_chat answers: a list of SSE bodies, one per call
+  const agentReplies = []
+  const sse = (delta, finish = null) => `data: ${JSON.stringify({ statusCodeValue: 200, body: JSON.stringify({ choices: [{ delta, finish_reason: finish }] }) })}\n\n`
   globalThis.fetch = async (input, init = {}) => {
     requests++
     const url = new URL(input)
@@ -79,6 +87,13 @@ try {
     if (url.pathname === '/algo/api/v2/model/list') {
       return Response.json({ chat: [], qwork: [{ key: 'fixture-model', enable: false, display_name: 'Fixture model', max_input_tokens: 200000 }] })
     }
+    if (url.pathname === '/algo/api/v2/service/pro/sse/agent_chat_generation') {
+      agentChats.push(JSON.parse(_internal.decodeBody(init.body)))
+      const reply = agentReplies.shift()
+      if (reply instanceof Response) return reply
+      if (typeof reply === 'string') return new Response(reply, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+      return new Response([sse({ role: 'assistant', content: 'hello fixture reply' }), sse({}, 'stop'), 'data: {"body":"[DONE]"}\n\n'].join(''), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+    }
     throw new Error('Unexpected model path: ' + url.pathname)
   }
   const plugin = await QwenWorkAuthPlugin({ client: { auth: { set: async ({ path, body }) => { assert.equal(path.id, 'qwenwork'); auth = body } } } })
@@ -100,6 +115,7 @@ try {
 
   const catalog = await plugin.provider.models({ models: {} }, { auth })
   assert.equal(catalog['fixture-model'].providerID, 'qwenwork')
+  assert.equal(catalog['fixture-model'].capabilities.toolcall, true)
 
   const usage = await plugin.auth.usage(async () => auth)
   assert.equal(usage.signIn, 'kept')
@@ -110,38 +126,84 @@ try {
   assert.equal(usageGone.signIn, 'expired')
   checks.push('Usage reports the account\'s credits and plan')
 
-  auth.expires = 0
   const loader = await plugin.auth.loader(async () => auth)
-  const completion = { model: 'fixture-model', messages: [{ role: 'user', content: 'fixture prompt' }], tools: [{ type: 'function', function: { name: 'lookup' } }] }
-  const { resetSDKCalls, assertSDKCall } = await import('./check-sdk.mjs?test')
-  resetSDKCalls()
-  const result = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(completion) })
-  assert.equal(result.status, 200)
-  const response = await result.json()
-  assert.equal(response.choices[0].message.content, 'hello fixture reply')
-  assert.equal(response.choices[0].finish_reason, 'stop')
-  await assertSDKCall('fixture-model', async () => auth)
-  checks.push('Agent SDK bridge answers one JSON chat completion')
+  const chat = (over = {}) => ({ model: 'fixture-model', messages: [{ role: 'user', content: 'fixture prompt' }], ...over })
 
-  resetSDKCalls()
-  const streamed = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify({ ...completion, stream: true }) })
+  // A plain prompt: the host's system message rides along, the provider's own
+  // words sit above it, and the answer comes back as one completion.
+  const plain = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat({ messages: [{ role: 'system', content: 'host rules' }, { role: 'user', content: 'fixture prompt' }] })) })
+  assert.equal(plain.status, 200)
+  const plainBody = await plain.json()
+  assert.equal(plainBody.choices[0].message.content, 'hello fixture reply')
+  assert.equal(plainBody.choices[0].finish_reason, 'stop')
+  assert.equal(agentChats[0].model_config.key, 'fixture-model')
+  assert.match(agentChats[0].system[0].text, /^You are QwenWork/)
+  assert.match(agentChats[0].system[0].text, /host rules/)
+  checks.push('Chat is rewritten as QwenWork\'s agent request with the host\'s system message')
+
+  // The host's tools ride along; a native tool_calls answer comes back structured.
+  const tools = [{ type: 'function', function: { name: 'lookup', description: 'find it', parameters: { type: 'object', properties: { q: { type: 'string' } } } } }]
+  agentReplies.push([
+    sse({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_fixture', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }] }),
+    sse({}, 'tool_calls'),
+    'data: {"body":"[DONE]"}\n\n',
+  ].join(''))
+  const called = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat({ tools, tool_choice: 'auto' })) })
+  assert.equal(called.status, 200)
+  const calledBody = await called.json()
+  assert.deepEqual(calledBody.choices[0].message.tool_calls, [{ id: 'call_fixture', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }])
+  assert.equal(calledBody.choices[0].finish_reason, 'tool_calls')
+  assert.deepEqual(agentChats[1].tools, [{ type: 'function', function: { name: 'lookup', description: 'find it', parameters: { type: 'object', properties: { q: { type: 'string' } } } } }])
+  checks.push('The host\'s tools ride along and a tool call comes back structured')
+
+  // A model that emits its call as inline <tool_call> text has it lifted out,
+  // and no markup reaches the caller: the leak this replaces never shows.
+  agentReplies.push([
+    sse({ role: 'assistant', content: 'Let me look.<tool_call>{"name":"read","arguments":{"path":"/tmp/x"}}</tool_call>' }),
+    sse({}, 'tool_calls'),
+    'data: {"body":"[DONE]"}\n\n',
+  ].join(''))
+  const inline = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat({ tools })) })
+  assert.equal(inline.status, 200)
+  const inlineBody = await inline.json()
+  assert.ok(!inlineBody.choices[0].message.content.includes('<tool_call>'), 'no markup in the text')
+  assert.deepEqual(inlineBody.choices[0].message.tool_calls, [{ id: inlineBody.choices[0].message.tool_calls[0].id, type: 'function', function: { name: 'read', arguments: '{"path":"/tmp/x"}' } }])
+  assert.equal(inlineBody.choices[0].finish_reason, 'tool_calls')
+  checks.push('Inline <tool_call> text is lifted into structured tool calls')
+
+  // A tool result turn maps back as Qoder's tool message.
+  agentReplies.push([sse({ role: 'assistant', content: 'done' }), sse({}, 'stop'), 'data: {"body":"[DONE]"}\n\n'].join(''))
+  const withResult = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat({ tools, messages: [
+    { role: 'user', content: 'fixture prompt' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'call_fixture', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }] },
+    { role: 'tool', tool_call_id: 'call_fixture', content: 'the result' },
+  ] })) })
+  assert.equal(withResult.status, 200)
+  assert.ok(agentChats[3].messages.some(m => m.role === 'tool' && m.tool_call_id === 'call_fixture' && m.content === 'the result'))
+  checks.push('Tool results ride back as tool messages')
+  // Streaming keeps the SSE shape magpie's client expects.
+  const streamed = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat({ stream: true })) })
   assert.equal(streamed.status, 200)
   const streamText = await streamed.text()
   assert.match(streamText, /chat.completion.chunk/)
   assert.match(streamText, /data: \[DONE\]/)
   checks.push('Stream requests return one SSE completion')
 
+  // A lapsed sign-in fails before another chat request.
   rejectRefresh = true
-  auth.expires = Date.now() - 1
-  const denied = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(completion) })
+  auth = { ...auth, expires: Date.now() - 1 }
+  const denied = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat()) })
   assert.equal(denied.status, 401)
-  assert.match((await denied.text()), /sign-in lapsed|sign in again/i)
-  checks.push('Invalid Magpie access token fails before another SDK chat request')
+  assert.equal(denied.headers.get('X-Magpie-Sign-In'), 'expired')
+  checks.push('Invalid Magpie access token fails before another chat request')
 
+  // An upstream failure carries no token-shaped text.
+  rejectRefresh = false
   auth.expires = Date.now() + 3_600_000
-  const leaked = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify({ model: 'explode', messages: [{ role: 'user', content: 'x' }] }) })
+  agentReplies.push(new Response(JSON.stringify({ message: 'boom: Authorization: Bearer COSY.abc.def and eyJhbGciOiJIUzI1NiJ9.payload.sig' }), { status: 500 }))
+  const leaked = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat()) })
   const bodyText = await leaked.text()
-  assert.equal(leaked.status, 502)
+  assert.equal(leaked.status, 500)
   assert.ok(!/Bearer\s+(?!\[redacted\])\S/.test(bodyText) && !bodyText.includes('COSY.') && !/ey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+\./.test(bodyText), 'no bearer, COSY or jwt leaks in the client-facing error')
   checks.push('Client-facing errors carry no token-shaped text')
 

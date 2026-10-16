@@ -5,7 +5,8 @@
 ![Platform](https://img.shields.io/badge/platform-macOS-blue) ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 
 Your QwenWork subscription as an OpenCode provider: signs in through QwenWork's
-own device flow and serves its models over the QwenWork Agent SDK.
+own device flow and serves its models over QwenWork's own agent endpoint, with
+the host agent's tools riding along.
 
 > Unofficial. Not reviewed by magpie. Read the code before installing.
 > Verified end to end on macOS against the QwenWork 1.2.5 desktop app.
@@ -29,9 +30,8 @@ magpie plugin login qwenwork
 repository, or a local folder. This repository is meant to be installed by its
 `github:` spec — that is what follows the code here and picks up updates.
 
-Installing fetches the Agent SDK (`@qoder-ai/qoder-agent-sdk`) as a dependency;
-the worker runtime it needs is downloaded on first use (see below). Then pick
-`qwenwork/<model>` for an agent, e.g. `magpie claude qwenwork/flash`.
+The plugin has no runtime dependencies of its own. Pick `qwenwork/<model>` for
+an agent, e.g. `magpie claude qwenwork/flash`.
 
 - **Already installed from a local folder?** Add the `github:` spec and remove
   the folder one, so magpie tracks the repository instead:
@@ -39,7 +39,7 @@ the worker runtime it needs is downloaded on first use (see below). Then pick
   magpie plugin add github:harwinvoid/magpie-plugin-qwenwork
   magpie plugin rm /path/to/your/local/magpie-plugin-qwenwork
   ```
-  The sign-in carries over; the worker cache is reused.
+  The sign-in carries over.
 - **Finding it in the app.** The repository is tagged `magpie-plugin`, so magpie
   lists it under Plugins → Discover → *Unofficial* (community plugins, not
   reviewed by magpie). Install it there, or with the command above.
@@ -48,9 +48,18 @@ the worker runtime it needs is downloaded on first use (see below). Then pick
 
 Sign-in uses the same PKCE device flow the QwenWork desktop app uses, then
 keeps the access token refreshed with its own refresh token. The account is
-shown by name, falling back to its id. Chat is handed to the QwenWork Agent SDK,
-which signs the request (COSY envelope, request codec), picks the model route
-and pins the scene — so the provider only supplies the host job token.
+shown by name, falling back to its id.
+
+Chat is rewritten as QwenWork's own `agent_chat_generation` request — the same
+request shape the desktop app's engine and the Qoder client speak:
+
+- The host agent's **tools ride along** in the request, so an OpenCode session
+  keeps its full tool loop (read, edit, bash, …) on a `qwenwork` model.
+- **Tool calls come back structured**, either as the gateway's native
+  `tool_calls` or lifted out of inline `<tool_call>` text — never as markup in
+  the answer.
+- The host's system messages ride along under a short QwenWork preamble, and
+  reasoning, usage and credits map back the way the client shows them.
 
 Verified configuration, read from the desktop app's own bundle:
 
@@ -60,38 +69,12 @@ web / openapi / api   https://gateway.qwenwork.cn
 redirect_uri  qwenwork-cn://
 device flow   /device/selectAccounts -> /api/v1/deviceToken/poll
 refresh       /api/v1/deviceToken/refresh   (target: "c")
+chat          /algo/api/v2/service/pro/sse/agent_chat_generation
 models        the "qwork" scene
 ```
 
 Every value, plus the COSY RSA key, can be overridden through `QWENWORK_*`
 environment variables and `defaults.json`.
-
-## The worker runtime, the `cn` build, and why they are handled at load
-
-Two facts about `@qoder-ai/qoder-agent-sdk` shape the plugin:
-
-1. **The worker runtime is not in the npm package.** Its postinstall downloads it
-   from the SDK's release CDN. Magpie installs plugins with `--ignore-scripts`, so
-   that download never runs — the plugin fetches the worker itself, once, from the
-   template in the SDK's `runtime-manifest.json`, and checks the published sha256.
-   (A worker already present in the package is used as is.)
-2. **The npm package is the *global* build; QwenWork's gateway only accepts *cn*.**
-   The brand is a compile-time constant baked into the worker:
-
-   ```js
-   // global build:   Cn = "cn" === (site = "global")
-   // cn build:       Cn = "cn" === (site = "cn")
-   ```
-
-   There is no published cn package (`@ali/qodercn-agent-sdk-next` is not public),
-   and the two builds' workers differ almost byte for byte. So the plugin rewrites
-   just that one constant to `cn` before caching the worker — see `pinToCn()` and
-   `stageRuntime()` in `index.mjs`. If the constant is not found or a `global`
-   brand token remains, the plugin stops with a clear error rather than sign
-   requests the gateway will reject.
-
-The patched worker is cached under `~/.cache/magpie/qwenwork-worker-runtime`
-(dir `0700`, file `0600`).
 
 ## Usage
 
@@ -114,30 +97,24 @@ qwenwork · Your Plan · until Nov 1 · you@example.com  subscription  Credits 1
 
 ## Notes
 
-- Magpie runs plugins under bun, where the SDK's default worker transport does
-  not start; the provider runs the SDK runtime as a child process instead. The
-  patched runtime is cached under `~/.cache/magpie/qwenwork-worker-runtime`
-  (dir `0700`, file `0600`) and only rewritten when its bytes change.
-- Only text prompts are served. A lapsed sign-in is reported as such, and a
-  request is given up after `QWENWORK_REQUEST_TIMEOUT_MS` (default 300000 ms).
-- Chat runs one turn in a scratch cwd with every tool disallowed — the SDK is a
-  transport here, never a coding agent. The error a caller sees is trimmed and
-  token-redacted before it leaves.
+- Only the chat completions endpoint is served. A lapsed sign-in is reported
+  as such, and an upstream failure is trimmed and token-redacted before it
+  reaches the caller.
 - The provider's icon is the QwenWork app icon, used to identify the product.
-- `QWENWORK_SDK_DEBUG=1` writes the SDK's own diagnostics to `sdk-debug-magpie.log`.
 - MIT.
 
 ## Verify
 
 ```sh
-node check.mjs     # offline, mocked SDK and upstream
+node check.mjs     # offline, mocked upstream
 ./live-e2e.sh      # live: models, chat, streaming through the gateway
 ```
 
 ## Files
 
-- `index.mjs` — the provider: configuration, device sign-in, the Agent SDK bridge.
-- `vendor/qoder.mjs` — sign-in and catalog code shared with the Qoder plugin.
+- `index.mjs` — the provider: configuration, device sign-in, usage.
+- `vendor/qoder.mjs` — the adapter shared with the Qoder plugin: sign-in, the
+  agent_chat_generation codec, tool-call lifting, usage.
 - `defaults.json` — verified desktop configuration.
 - `icon.png` — the provider's picture, the QwenWork app icon.
-- `check.mjs`, `check-sdk.mjs`, `live-e2e.sh` — the offline and live checks.
+- `check.mjs`, `live-e2e.sh` — the offline and live checks.

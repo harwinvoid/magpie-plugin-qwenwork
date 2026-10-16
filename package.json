@@ -1,7 +1,7 @@
 {
   "name": "opencode-qwenwork-auth",
   "version": "0.1.0",
-  "description": "QwenWork (千问办公) as a magpie / OpenCode provider, signing in through QwenWork's own device flow and serving its models over the QwenWork Agent SDK.",
+  "description": "QwenWork (千问办公) as a magpie / OpenCode provider, signing in through QwenWork's own device flow and serving its models over QwenWork's own agent endpoint — with the host's tools riding along.",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
@@ -12,10 +12,7 @@
   "engines": {
     "node": ">=20"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
-    "@qoder-ai/qoder-agent-sdk": "1.0.51"
-  },
+  "dependencies": {},
   "keywords": [
     "magpie-plugin"
   ],
@@ -23,7 +20,6 @@
     "README.md",
     "README.zh-CN.md",
     "check.mjs",
-    "check-sdk.mjs",
     "defaults.json",
     "icon.png",
     "index.mjs",

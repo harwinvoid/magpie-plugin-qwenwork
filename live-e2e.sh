@@ -35,6 +35,20 @@ t=sys.stdin.read()
 assert "chat.completion.chunk" in t and "[DONE]" in t, "stream malformed"
 print("PASS: SSE chunk + [DONE]")' || fail=1
 
+echo "== flash with tools (host tool loop) =="
+curl --silent --show-error --max-time 120 "$GW/v1/chat/completions" \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"qwenwork/flash","messages":[{"role":"system","content":"You are a coding agent. Use the tools you are given."},{"role":"user","content":"Call the get_project_files tool now to list the files in the project root. Do not answer in text."}],"tools":[{"type":"function","function":{"name":"get_project_files","description":"List the files in the project root","parameters":{"type":"object","properties":{"path":{"type":"string","description":"directory to list"}},"required":[]}}}],"tool_choice":"auto","max_tokens":256,"stream":false}' \
+  | python3 -c '
+import json,sys
+j=json.load(sys.stdin); m=j["choices"][0]["message"]
+calls=m.get("tool_calls") or []
+assert calls, f"no tool_calls in response: {json.dumps(j)[:400]}"
+names=[c["function"]["name"] for c in calls]
+assert "get_project_files" in names, f"unexpected calls {names}"
+assert "<tool_call>" not in (m.get("content") or ""), "markup leaked into text"
+print("PASS: structured tool_calls:", names, "finish:", j["choices"][0]["finish_reason"])' || fail=1
+
 echo "== unauthenticated state =="
 if [ "$fail" -eq 0 ]; then echo "ALL LIVE CHECKS PASSED"; else echo "SOME CHECKS FAILED"; fi
 exit "$fail"
