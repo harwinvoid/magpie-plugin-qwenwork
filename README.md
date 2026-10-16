@@ -2,6 +2,8 @@
 
 [中文说明 / Chinese](README.zh-CN.md)
 
+![Platform](https://img.shields.io/badge/platform-macOS-blue) ![Platform](https://img.shields.io/badge/platform-Windows-blue)
+
 Your QwenWork subscription as an OpenCode provider: signs in through QwenWork's
 own device flow and serves its models over the QwenWork Agent SDK.
 

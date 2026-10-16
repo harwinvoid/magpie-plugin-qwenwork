@@ -2,6 +2,8 @@
 
 [English](README.md)
 
+![Platform](https://img.shields.io/badge/platform-macOS-blue) ![Platform](https://img.shields.io/badge/platform-Windows-blue)
+
 把你的千问办公订阅接成 OpenCode provider：用千问办公自己的设备登录流程登录，
 再通过千问办公 Agent SDK 调用它的模型。
 
