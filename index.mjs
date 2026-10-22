@@ -59,11 +59,21 @@ function qwenworkUsage(openapi) {
         const total = Number(q.total)
         const remaining = Number(q.remaining)
         const used = Number.isFinite(Number(q.used)) ? Number(q.used) : total - remaining
+        const exhausted = q.exceeded === true || (Number.isFinite(remaining) && remaining <= 0)
+        // A free plan reports only what is left: total and used are null. That
+        // remaining figure is still the account's allowance, so it is shown as
+        // a balance -- before, the panel said "no credits" with the number
+        // sitting right there in the same response.
+        if (Number.isFinite(remaining)) out.balance = `${num(remaining)} credits`
         if (Number.isFinite(total) && total > 0 && Number.isFinite(used) && used >= 0) {
-          out.windows = [{ name: 'Credits', used: Math.min(100, (100 * used) / total), display: `${num(used)} / ${num(total)} credits` }]
+          out.windows = [{ name: 'Credits', used: exhausted ? 100 : Math.min(100, (100 * used) / total), display: `${num(used)} / ${num(total)} credits` }]
+        } else if (exhausted) {
+          // No total to take a share of: a full bar is the honest reading of
+          // "exceeded" when only the remainder is known.
+          out.windows = [{ name: 'Credits', used: 100, display: out.balance }]
         }
       }
-      if (!out.windows) out.error = 'QwenWork: the account reports no credits'
+      if (!out.windows && !out.balance) out.error = 'QwenWork: the account reports no credits'
       return out
     } catch (e) {
       return { error: String(e?.message ?? e), signIn }
