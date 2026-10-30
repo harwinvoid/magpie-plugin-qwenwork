@@ -19,6 +19,7 @@ const savedEnv = Object.fromEntries(names.map(k => [k, process.env['QWENWORK_' +
 const originalFetch = globalThis.fetch
 const checks = []
 let requests = 0
+let cosyUser = ''
 // the agent_chat requests the mock saw, decoded
 let agentChats = []
 try {
@@ -82,6 +83,7 @@ try {
     assert.equal(init.headers['Cosy-Version'], values.COSY_VERSION)
     assert.equal(init.headers['Cosy-ClientType'], '6')
     assert.equal(init.headers['Cosy-Business-Product'], 'qoder_work')
+    cosyUser = init.headers['Cosy-User']
     const payload = JSON.parse(Buffer.from(init.headers.Authorization.split('.')[1], 'base64'))
     assert.equal(payload.cosyVersion, values.COSY_VERSION)
     if (url.pathname === '/algo/api/v2/model/list') {
@@ -116,6 +118,18 @@ try {
   const catalog = await plugin.provider.models({ models: {} }, { auth })
   assert.equal(catalog['fixture-model'].providerID, 'qwenwork')
   assert.equal(catalog['fixture-model'].capabilities.toolcall, true)
+
+  // A saved user id from an older device poll is not the access token's
+  // subject. QwenWork refuses that pair. The envelope must carry the token's.
+  const subject = 'token-subject-user'
+  const jwt = [
+    Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url'),
+    Buffer.from(JSON.stringify({ user_id: subject, sub: subject })).toString('base64url'),
+    'sig',
+  ].join('.')
+  await plugin.provider.models({ models: {} }, { auth: { ...auth, access: jwt, uid: 'stale-saved-user' } })
+  assert.equal(cosyUser, subject)
+  checks.push('A stale saved user id is replaced by the access token subject')
 
   const usage = await plugin.auth.usage(async () => auth)
   assert.equal(usage.signIn, 'kept')

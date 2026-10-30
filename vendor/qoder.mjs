@@ -75,6 +75,32 @@ function machineOS() {
   return arch + "_" + process.platform
 }
 
+// tokenUser is the account id the access token itself names. QwenWork's
+// gateway checks the COSY user against that id.
+function tokenUser(access) {
+  const part = String(access ?? "").split(".")[1]
+  if (!part) return ""
+  try {
+    const claims = JSON.parse(Buffer.from(part, "base64url").toString())
+    return String(claims.user_id ?? claims.sub ?? "").trim()
+  } catch {
+    return ""
+  }
+}
+
+// cosyAccount is the account a QwenWork call is signed as. The id saved at
+// sign-in can be an older device-poll user id. The gateway then refuses the
+// call with "User identity could not be verified" before any model list or
+// chat. The token's user_id is the id account-context names, so that is the
+// one the envelope carries. Other sites keep the saved id, and so does a
+// token that isn't a JWT.
+function cosyAccount(u, site) {
+  if (site?.modelScene !== "qwork" || !u) return u
+  const uid = tokenUser(u.access)
+  if (!uid || uid === u.uid) return u
+  return { ...u, uid }
+}
+
 // userBlob is the account as the envelope carries it: AES-128-CBC under a
 // fresh key that is its own IV, the key wrapped with Qoder's RSA key.
 function userBlob(u, rsaKey = RSA_KEY) {
@@ -88,6 +114,7 @@ function userBlob(u, rsaKey = RSA_KEY) {
 
 // cosyHeaders signs a call to url whose body, in its wire form, is body.
 function cosyHeaders(url, u, body, site, ts = Math.floor(Date.now() / 1000)) {
+  u = cosyAccount(u, site)
   if (!u?.machineId) throw new Error(`${site?.name ?? "QwenWork"}: the account has no machine id; sign in again`)
   const cosyVersion = site?.cosyVersion ?? COSY_VERSION
   const blob = userBlob(u, site?.rsaKey)
