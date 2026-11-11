@@ -73,6 +73,14 @@ redirect_uri  qwenwork-cn://
 以上每一项，连同 COSY RSA 公钥，都可以通过 `QWENWORK_*` 环境变量和
 `defaults.json` 覆盖。
 
+公网登录只会得到个人版账号。企业旗舰版是同一个 provider 上的第二种登录：填写企业
+自己的域名（管理后台地址栏里的主机名，例如 `your-company.vpc.qwenwork.cn`），
+并且**不**发送 `redirect_uri`（旗舰版的 `/device/selectAccounts` 会拒绝它）。
+之后的对话、刷新、模型列表和用量都走这一个域名，账号记为 `<邮箱|id> (<域名>)`。
+设置 `QWENWORK_ENT_DOMAIN` 后登录不再询问域名。旗舰版没有模型目录
+（`/algo/api/v2/model/list` 返回 503），因此回退到 flash、pro 和
+qwen3.8-max-preview。
+
 ## 用量
 
 magpie 会在 provider 旁边显示账号的积分。数据取自登录时已经在读的同一个
