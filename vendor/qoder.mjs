@@ -239,11 +239,19 @@ function vpcSite(site, instance) {
   return { ...site, web: `https://${name}.${d}`, openapi: `https://${name}-openapi.${d}`, api: `https://${name}-gateway.${d}`, vpc: name }
 }
 
-// siteOf is the site an account is served from: its VPC instance's when it
-// was signed in to one, else site. An instance on record that names none
-// is not read as "no VPC", which would send the enterprise's tokens to the
-// public hosts: the account has to be signed in to again.
+// siteOf is the site an account is served from: its enterprise flagship host
+// when it was signed in to one, else its Qoder CN VPC instance, else site.
+// An instance on record that names none is not read as "no VPC", which would
+// send the enterprise's tokens to the public hosts: the account has to be
+// signed in to again.
 function siteOf(site, a) {
+  // QwenWork's flagship (企业旗舰版) serves web, openapi and the model API on
+  // one host. That is not Qoder CN's split (name / name-openapi / name-gateway).
+  const host = String(a?.enterpriseHost ?? "").trim().toLowerCase()
+  if (host) {
+    const base = `https://${host}`
+    return { ...site, web: base, openapi: base, api: base, redirect: "", vpc: host, enterpriseDomain: host, fallbackModels: site.qworkFallback }
+  }
   if (a?.vpc === undefined || a?.vpc === null || a?.vpc === "") return site
   const s = vpcSite(site, a.vpc)
   if (!s) throw new SignInGone(`${site.name}: the account's VPC instance "${a.vpc}" isn't one; sign in again`)
@@ -308,14 +316,18 @@ async function deviceSignIn(site) {
         ...chat,
         // a VPC account is told apart from the same person's public one; a
         // device-only account is shown by name, falling back to id
-        accountId: site.vpc ? `${email || uid} (${site.vpc})` : site.deviceOnly ? name || email || uid || dt.user_id : email || dt.user_id,
+        // a flagship account is named by its email (or id) and its own host,
+        // so it is never stored as the same person's public-cloud account
+        accountId: site.enterpriseDomain
+          ? `${email || uid} (${site.enterpriseDomain})`
+          : site.vpc ? `${email || uid} (${site.vpc})` : site.deviceOnly ? name || email || uid || dt.user_id : email || dt.user_id,
         uid,
-        email: site.deviceOnly ? "" : email,
+        email: site.deviceOnly && !site.enterpriseDomain ? "" : email,
         name: name || dt.user_name || "",
         machineId,
         deviceToken: dt.token,
         deviceRefresh: dt.refresh_token ?? "",
-        ...(site.vpc ? { vpc: site.vpc } : {}),
+        ...(site.enterpriseDomain ? { vpc: site.enterpriseDomain, enterpriseHost: site.enterpriseDomain } : site.vpc ? { vpc: site.vpc } : {}),
       }
     },
   }
@@ -507,7 +519,12 @@ async function fetchListing(site, cred) {
   const url = site.api + MODELS_PATH
   const res = await fetch(url, { headers: cosyHeaders(url, cred, "", site), signal: AbortSignal.timeout(15_000) })
   const text = await res.text()
-  if (!res.ok) throw new Error(`${site.name} models: HTTP ${res.status}: ${text.trim().slice(0, 512)}`)
+  if (!res.ok) {
+    // the flagship deploys no catalog (/algo/api/v2/model/list is 503);
+    // the public cloud's qwork list shipped with the provider stands in
+    if (res.status === 503 && site.fallbackModels) return site.fallbackModels
+    throw new Error(`${site.name} models: HTTP ${res.status}: ${text.trim().slice(0, 512)}`)
+  }
   return JSON.parse(text)
 }
 
@@ -1474,4 +1491,5 @@ export const QoderAuthPlugin = makePlugin(SITES.qoder)
 export const QoderCNAuthPlugin = makePlugin(SITES["qoder-cn"])
 
 // for tests
-export const _internal = { vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, SITES, decodeBody, events }
+export { deviceSignIn }
+export const _internal = { vpcInstance, vpcSite, siteOf, parseUsage, gfmt, when, failure, modelInfo, qoderBody, SITES, decodeBody, events, deviceSignIn }

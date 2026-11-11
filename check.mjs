@@ -14,13 +14,14 @@ import { fileURLToPath } from 'node:url'
 import { QwenWorkAuthPlugin } from './index.mjs'
 import { _internal } from './vendor/qoder.mjs'
 
-const names = ['CLIENT_ID', 'WEB', 'OPENAPI', 'API', 'RSA_PUBLIC_KEY', 'COSY_VERSION']
+const names = ['CLIENT_ID', 'WEB', 'OPENAPI', 'API', 'RSA_PUBLIC_KEY', 'COSY_VERSION', 'ENT_DOMAIN']
 const savedEnv = Object.fromEntries(names.map(k => [k, process.env['QWENWORK_' + k]]))
 const originalFetch = globalThis.fetch
 const checks = []
 let requests = 0
 // the agent_chat requests the mock saw, decoded
 let agentChats = []
+let chatHosts = []
 try {
   for (const k of names) delete process.env['QWENWORK_' + k]
   globalThis.fetch = () => { requests++; throw new Error('Unexpected network request') }
@@ -57,6 +58,20 @@ try {
   globalThis.fetch = async (input, init = {}) => {
     requests++
     const url = new URL(input)
+    if (url.hostname === 'ent.example.invalid') {
+      if (url.pathname === '/api/v1/deviceToken/poll')
+        return Response.json({ token: 'fake-device', refresh_token: 'fake-device-refresh', user_id: 'fixture-user', expires_in: 3600 })
+      if (url.pathname === '/api/v1/adapter/user/account-context')
+        return Response.json({ data: { user: { id: 'fixture-user', name: 'Fixture', email: '' }, plan: { name: 'Enterprise' }, quota: { total: 10000, used: 256.5147, remaining: 9743.4853, exceeded: false } } })
+      if (url.pathname === '/algo/api/v2/model/list')
+        return new Response('Model catalog is unavailable', { status: 503 })
+      if (url.pathname === '/algo/api/v2/service/pro/sse/agent_chat_generation') {
+        chatHosts.push(url.hostname)
+        agentChats.push(JSON.parse(_internal.decodeBody(init.body)))
+        return new Response([sse({ role: 'assistant', content: 'hello fixture reply' }), sse({}, 'stop'), 'data: {"body":"[DONE]"}\n\n'].join(''), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      throw new Error('Unexpected enterprise path: ' + url.pathname)
+    }
     if (url.hostname === 'account.example.invalid') {
       const body = init.body ? JSON.parse(init.body) : undefined
       switch (url.pathname) {
@@ -88,6 +103,7 @@ try {
       return Response.json({ chat: [], qwork: [{ key: 'fixture-model', enable: false, display_name: 'Fixture model', max_input_tokens: 200000 }] })
     }
     if (url.pathname === '/algo/api/v2/service/pro/sse/agent_chat_generation') {
+      chatHosts.push(url.hostname)
       agentChats.push(JSON.parse(_internal.decodeBody(init.body)))
       const reply = agentReplies.shift()
       if (reply instanceof Response) return reply
@@ -104,7 +120,10 @@ try {
   assert.equal(plugin.auth.provider, 'qwenwork')
   assert.equal(typeof plugin.auth.usage, 'function', 'the provider reports usage')
   assert.match(plugin.auth.icon, /^data:image\/png;base64,/, 'the provider carries its own icon')
-  assert.equal(plugin.auth.methods.length, 1)
+  assert.equal(plugin.auth.methods.length, 2)
+  assert.equal(plugin.auth.methods[1].label, 'Sign in with QwenWork 企业旗舰版（输入企业域名）')
+  assert.throws(() => plugin.auth.methods[1].authorize({ domain: 'not a domain' }), /企业域名/)
+  assert.throws(() => plugin.auth.methods[1].authorize({ domain: 'http://ent.example.invalid' }), /企业域名/)
   const login = await plugin.auth.methods[0].authorize()
   const loginURL = new URL(login.url)
   assert.equal(loginURL.origin, values.WEB)
@@ -126,8 +145,42 @@ try {
   assert.equal(usageGone.signIn, 'expired')
   checks.push('Usage reports the account\'s credits and plan')
 
+  // Flagship sign-in sends no redirect_uri and pins later calls to that host.
+  // Its catalog 503 falls back to the shipped qwork list.
+  const entLogin = await plugin.auth.methods[1].authorize({ domain: 'https://ent.example.invalid/' })
+  const entURL = new URL(entLogin.url)
+  assert.equal(entURL.origin, 'https://ent.example.invalid')
+  assert.equal(entURL.pathname, '/device/selectAccounts')
+  assert.equal(entURL.searchParams.get('redirect_uri'), null)
+  assert.equal(entURL.searchParams.get('client_id'), values.CLIENT_ID)
+  const entAuth = { ...(await entLogin.callback()), type: 'oauth' }
+  assert.equal(entAuth.enterpriseHost, 'ent.example.invalid')
+  assert.equal(entAuth.accountId, 'fixture-user (ent.example.invalid)')
+  const entCatalog = await plugin.provider.models({ models: {} }, { auth: entAuth })
+  assert.equal(entCatalog.pro.name, '高级')
+  assert.equal(entCatalog.flash.providerID, 'qwenwork')
+  const entUsage = await plugin.auth.usage(async () => entAuth)
+  assert.equal(entUsage.plan, 'Enterprise')
+  assert.equal(entUsage.windows[0].display, '256.51 / 10000 credits')
+  const entLoader = await plugin.auth.loader(async () => entAuth)
+  const entChat = await entLoader.fetch(values.API + '/chat/completions', { body: JSON.stringify({ model: 'pro', messages: [{ role: 'user', content: 'fixture prompt' }] }) })
+  assert.equal(entChat.status, 200)
+  assert.equal(chatHosts.at(-1), 'ent.example.invalid')
+  assert.equal(agentChats.at(-1).model_config.key, 'pro')
+  checks.push('Enterprise flagship sign-in omits redirect_uri and serves that host')
+
+  process.env.QWENWORK_ENT_DOMAIN = 'sunmi.vpc.qwenwork.cn'
+  const preset = await QwenWorkAuthPlugin({ client: {} })
+  delete process.env.QWENWORK_ENT_DOMAIN
+  assert.equal(preset.auth.methods[1].prompts.length, 0)
+  const presetURL = new URL((await preset.auth.methods[1].authorize()).url)
+  assert.equal(presetURL.origin, 'https://sunmi.vpc.qwenwork.cn')
+  assert.equal(presetURL.searchParams.get('redirect_uri'), null)
+  checks.push('QWENWORK_ENT_DOMAIN presets the flagship host')
+
   const loader = await plugin.auth.loader(async () => auth)
   const chat = (over = {}) => ({ model: 'fixture-model', messages: [{ role: 'user', content: 'fixture prompt' }], ...over })
+  const personalAt = agentChats.length
 
   // A plain prompt: the host's system message rides along, the provider's own
   // words sit above it, and the answer comes back as one completion.
@@ -136,9 +189,10 @@ try {
   const plainBody = await plain.json()
   assert.equal(plainBody.choices[0].message.content, 'hello fixture reply')
   assert.equal(plainBody.choices[0].finish_reason, 'stop')
-  assert.equal(agentChats[0].model_config.key, 'fixture-model')
-  assert.match(agentChats[0].system[0].text, /^You are QwenWork/)
-  assert.match(agentChats[0].system[0].text, /host rules/)
+  assert.equal(chatHosts[personalAt], 'model.example.invalid')
+  assert.equal(agentChats[personalAt].model_config.key, 'fixture-model')
+  assert.match(agentChats[personalAt].system[0].text, /^You are QwenWork/)
+  assert.match(agentChats[personalAt].system[0].text, /host rules/)
   checks.push('Chat is rewritten as QwenWork\'s agent request with the host\'s system message')
 
   // The host's tools ride along; a native tool_calls answer comes back structured.
@@ -153,7 +207,7 @@ try {
   const calledBody = await called.json()
   assert.deepEqual(calledBody.choices[0].message.tool_calls, [{ id: 'call_fixture', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }])
   assert.equal(calledBody.choices[0].finish_reason, 'tool_calls')
-  assert.deepEqual(agentChats[1].tools, [{ type: 'function', function: { name: 'lookup', description: 'find it', parameters: { type: 'object', properties: { q: { type: 'string' } } } } }])
+  assert.deepEqual(agentChats[personalAt + 1].tools, [{ type: 'function', function: { name: 'lookup', description: 'find it', parameters: { type: 'object', properties: { q: { type: 'string' } } } } }])
   checks.push('The host\'s tools ride along and a tool call comes back structured')
 
   // A model that emits its call as inline <tool_call> text has it lifted out,
@@ -179,7 +233,7 @@ try {
     { role: 'tool', tool_call_id: 'call_fixture', content: 'the result' },
   ] })) })
   assert.equal(withResult.status, 200)
-  assert.ok(agentChats[3].messages.some(m => m.role === 'tool' && m.tool_call_id === 'call_fixture' && m.content === 'the result'))
+  assert.ok(agentChats[personalAt + 3].messages.some(m => m.role === 'tool' && m.tool_call_id === 'call_fixture' && m.content === 'the result'))
   checks.push('Tool results ride back as tool messages')
   // Streaming keeps the SSE shape magpie's client expects.
   const streamed = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat({ stream: true })) })

@@ -76,6 +76,16 @@ models        the "qwork" scene
 Every value, plus the COSY RSA key, can be overridden through `QWENWORK_*`
 environment variables and `defaults.json`.
 
+The public-cloud sign-in only ever returns a personal account. The enterprise
+flagship (企业旗舰版) is a second sign-in on the same provider. It asks for the
+enterprise's own host — the admin console's host, such as
+`your-company.vpc.qwenwork.cn` — and sends **no** `redirect_uri`, which that
+host refuses. Chat, refresh, models and usage then stay on that one host, and
+the account is stored as `<email|id> (<host>)`. `QWENWORK_ENT_DOMAIN` presets
+the host so the sign-in asks nothing. The flagship has no model catalog
+(`/algo/api/v2/model/list` is 503), so the provider falls back to flash, pro
+and qwen3.8-max-preview.
+
 ## Usage
 
 Magpie shows the account's credits beside the provider. They come from the same

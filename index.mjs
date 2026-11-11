@@ -32,18 +32,51 @@ const num = (v) => {
   return String(Math.round(n * 100) / 100)
 }
 
+// The flagship deploys no model catalog. These are the public cloud's qwork
+// models, used only when that host answers 503. is_vl / max_input_tokens are
+// the public cloud's, not a given flagship's own.
+const QWORK_FALLBACK = {
+  qwork: [
+    { key: 'flash', display_name: '标准', is_vl: false, is_reasoning: false, max_input_tokens: 131072 },
+    { key: 'pro', display_name: '高级', is_vl: false, is_reasoning: false, max_input_tokens: 131072 },
+    { key: 'qwen3.8-max-preview', display_name: 'Qwen3.8-Max', is_vl: false, is_reasoning: false, max_input_tokens: 131072 },
+  ],
+}
+
+// enterpriseDomain is the flagship host the user typed: a bare host, or an
+// https:// address with no path. An IP, localhost, or a path is none.
+function enterpriseDomain(input) {
+  let e = String(input ?? '').trim().toLowerCase()
+  if (!e) return undefined
+  if (/^[a-z][a-z\d+.-]*:\/\//.test(e)) {
+    let u
+    try { u = new URL(e) } catch { return undefined }
+    if (u.protocol !== 'https:' || u.username || u.password || u.port || u.search || u.hash || (u.pathname !== '' && u.pathname !== '/')) return undefined
+    if (e.endsWith('/')) e = e.slice(0, -1)
+    if (u.hostname + '' !== e.slice('https://'.length)) return undefined
+    e = u.hostname
+  }
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(e)) return undefined
+  if (/^(localhost|.*\.localhost|.*\.local|.*\.internal)$/.test(e)) return undefined
+  if (!/^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(e)) return undefined
+  return e
+}
+
 // qwenworkUsage reads the account's credits for magpie's usage bar. The
 // account-context the sign-in already uses carries them: quota {total, used,
 // remaining, exceeded} in the plan's credit unit, and plan {name, next_refresh
 // / next_due}. One window is one pool of credits; when the plan refreshes, that
-// time is the window's reset.
+// time is the window's reset. A flagship account is read on its own host, not
+// the public cloud's.
 function qwenworkUsage(openapi) {
   return async (getAuth) => {
     let signIn = 'kept'
     try {
       const a = await getAuth()
       if (a?.type !== 'oauth' || !String(a.access ?? '').trim() || (a.expires > 0 && a.expires <= Date.now())) return { error: 'QwenWork: not signed in', signIn: 'expired' }
-      const res = await fetch(`${openapi}/api/v1/adapter/user/account-context?include=user,plan,quota`, {
+      const host = enterpriseDomain(a.enterpriseHost)
+      const base = host ? `https://${host}` : openapi
+      const res = await fetch(`${base}/api/v1/adapter/user/account-context?include=user,plan,quota`, {
         headers: { Accept: 'application/json', Authorization: `Bearer ${a.access}` },
         signal: AbortSignal.timeout(20_000),
       })
@@ -85,14 +118,47 @@ export async function QwenWorkAuthPlugin({ client }) {
     clientType: '6', businessProduct: 'qoder_work', sessionType: 'qoder_work',
     userInfoPath: '/api/v1/adapter/user/account-context?include=user,plan,quota,page,data_sharing',
     normalizeUser: v => (v?.data ?? v)?.user ?? (v?.data ?? v),
+    // promoted onto a flagship account's site when its catalog 503s
+    qworkFallback: QWORK_FALLBACK,
     models: [],
     // The adapter prefixes this under the host's own system messages; worded
     // for QwenWork, not the Qoder brand the adapter was shared from.
     systemPrompt: 'You are QwenWork (qw), a helpful assistant. Use the instructions below and the tools available to you to assist the user.',
   }
-  const { makePlugin } = await import('./vendor/qoder.mjs')
+  const { makePlugin, deviceSignIn } = await import('./vendor/qoder.mjs')
   const plugin = await makePlugin(site)({ client })
   plugin.auth.usage = qwenworkUsage(openapi)
   plugin.auth.icon = pluginIcon
+  // The public-cloud method above always sends redirect_uri=qwenwork-cn://
+  // and only ever yields a personal account. The flagship's
+  // /device/selectAccounts refuses that redirect, and serves web, openapi
+  // and chat on the enterprise's own host. QWENWORK_ENT_DOMAIN presets it.
+  const preset = enterpriseDomain(process.env.QWENWORK_ENT_DOMAIN ?? '')
+  plugin.auth.methods.push({
+    type: 'oauth',
+    label: preset ? `Sign in with QwenWork 企业旗舰版 (${preset})` : 'Sign in with QwenWork 企业旗舰版（输入企业域名）',
+    prompts: preset ? [] : [
+      {
+        type: 'text',
+        key: 'domain',
+        message: '你企业的千问办公旗舰版域名（企业管理后台地址栏的域名，如 your-company.vpc.qwenwork.cn）',
+        placeholder: 'your-company.vpc.qwenwork.cn 或 https://your-company.vpc.qwenwork.cn',
+        validate: (v) => (enterpriseDomain(v) ? undefined : '请输入企业域名（或 https:// 开头的完整地址），不要带路径'),
+      },
+    ],
+    authorize: (inputs) => {
+      const domain = preset || enterpriseDomain(inputs?.domain)
+      if (!domain) throw new Error('请输入企业域名（或设置 QWENWORK_ENT_DOMAIN 环境变量）')
+      return deviceSignIn({
+        ...site,
+        web: `https://${domain}`,
+        openapi: `https://${domain}`,
+        api: `https://${domain}`,
+        redirect: '',
+        enterpriseDomain: domain,
+        vpc: domain,
+      })
+    },
+  })
   return plugin
 }
