@@ -189,6 +189,48 @@ try {
   assert.match(streamText, /data: \[DONE\]/)
   checks.push('Stream requests return one SSE completion')
 
+  // A plain upstream 400 is retried with a fresh signature; the retry succeeds.
+  agentReplies.push(
+    new Response('Error in upstream response', { status: 400 }),
+    [sse({ role: 'assistant', content: 'recovered after 400' }), sse({}, 'stop'), 'data: {"body":"[DONE]"}\n\n'].join(''),
+  )
+  const beforeRetry = requests
+  const retried = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat()) })
+  assert.equal(retried.status, 200)
+  assert.equal(requests - beforeRetry, 2, 'the 400 was retried exactly once')
+  assert.equal((await retried.json()).choices[0].message.content, 'recovered after 400')
+  checks.push('An upstream 400 is retried and can recover')
+  // When every retry is refused, a 502 lets magpie fall through to the next member.
+  agentReplies.push(
+    new Response('Error in upstream response', { status: 400 }),
+    new Response('Error in upstream response', { status: 400 }),
+    new Response('Error in upstream response', { status: 400 }),
+    new Response('Error in upstream response', { status: 400 }),
+  )
+  const beforeExhaust = requests
+  const exhausted = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat()) })
+  assert.equal(exhausted.status, 502, 'exhausted 400 becomes a routable 502')
+  assert.equal(requests - beforeExhaust, 4, 'all four attempts were made')
+  checks.push('Exhausted 400 retries fall through as 502')
+
+  // A 400 carried inside a 200 SSE body (statusCodeValue=400) is also retried.
+  // This is the path the gateway used on 2026-11-25 13:11 that escaped the
+  // POST-level retry and reached magpie as a hard 400.
+  const sse400 = 'data: ' + JSON.stringify({ statusCodeValue: 400, body: 'Error in upstream response' }) + '\n\n'
+  agentReplies.push(sse400, [sse({ role: 'assistant', content: 'sse 400 recovered' }), sse({}, 'stop'), 'data: {"body":"[DONE]"}\n\n'].join(''))
+  const beforeSse400 = requests
+  const sseRecovered = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat()) })
+  assert.equal(sseRecovered.status, 200, 'SSE-embedded 400 is retried and can recover')
+  assert.equal(requests - beforeSse400, 2, 'the SSE 400 was retried exactly once')
+  assert.equal((await sseRecovered.json()).choices[0].message.content, 'sse 400 recovered')
+  checks.push('An SSE-embedded 400 is retried and can recover')
+  agentReplies.push(sse400, sse400, sse400, sse400)
+  const beforeSseExhaust = requests
+  const sseExhausted = await loader.fetch(values.API + '/chat/completions', { body: JSON.stringify(chat()) })
+  assert.equal(sseExhausted.status, 502, 'exhausted SSE 400 becomes a routable 502')
+  assert.equal(requests - beforeSseExhaust, 4, 'all four SSE attempts were made')
+  checks.push('Exhausted SSE-embedded 400 retries fall through as 502')
+
   // A lapsed sign-in fails before another chat request.
   rejectRefresh = true
   auth = { ...auth, expires: Date.now() - 1 }

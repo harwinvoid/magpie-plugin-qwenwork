@@ -1325,21 +1325,49 @@ export const makePlugin = (site) => async ({ client }) => {
     if (!m) return errorResponse({ status: 400, message: `unknown or disabled model "${chat.model}"` })
     const CHAT_URL = siteOf(site, cred).api + CHAT_PATH
     const wire = encodeBody(JSON.stringify(qoderBody(chat, m, site)))
-    const headers = {
-      ...cosyHeaders(CHAT_URL, cred, wire, site),
-      Accept: "text/event-stream",
-      "Cache-Control": "no-cache",
-      "X-Model-Key": m.key,
-      "X-Model-Source": m.source,
+    // QwenWork's gateway sometimes refuses a chat with a 400 ("Error in
+    // upstream response") that a later, freshly signed try answers. The
+    // refusal comes either as the POST's HTTP status or as a statusCodeValue
+    // inside an otherwise-200 SSE body; answer() turns the latter into a
+    // 400 Response. Retry both the same way, then hand an exhausted 400 back
+    // as 502 so magpie's router falls through instead of stopping on a 400.
+    const RETRY_400 = 3
+    for (let attempt = 0; ; attempt++) {
+      const headers = {
+        ...cosyHeaders(CHAT_URL, cred, wire, site),
+        Accept: "text/event-stream",
+        "Cache-Control": "no-cache",
+        "X-Model-Key": m.key,
+        "X-Model-Source": m.source,
+      }
+      let res
+      try {
+        res = await fetch(CHAT_URL, { method: "POST", headers, body: wire, signal: init.signal })
+      } catch (e) {
+        return errorResponse({ status: 502, message: e.message })
+      }
+      if (!res.ok) {
+        if (res.status !== 400 || attempt >= RETRY_400 || init.signal?.aborted) {
+          const f = failure(res.status, (await res.text()).slice(0, 1 << 20))
+          return errorResponse(f.status === 400 ? { status: 502, message: `${f.message} (after ${attempt + 1} tries)` } : f)
+        }
+        await res.arrayBuffer().catch(() => {})
+        await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)))
+        continue
+      }
+      const out = await answer(res, chat)
+      // A 200 stream can still carry a statusCodeValue=400 envelope, which
+      // answer() surfaces as a 400 Response. Retry it like the POST-level one.
+      if (out.status !== 400 || attempt >= RETRY_400 || init.signal?.aborted) {
+        if (out.status === 400) {
+          const body = await out.json().catch(() => ({}))
+          const msg = body?.error?.message ?? "Error in upstream response"
+          return errorResponse({ status: 502, message: `${msg} (after ${attempt + 1} tries)` })
+        }
+        return out
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)))
     }
-    let res
-    try {
-      res = await fetch(CHAT_URL, { method: "POST", headers, body: wire, signal: init.signal })
-    } catch (e) {
-      return errorResponse({ status: 502, message: e.message })
-    }
-    if (!res.ok) return errorResponse(failure(res.status, (await res.text()).slice(0, 1 << 20)))
-    return answer(res, chat)
   }
 
   return {
